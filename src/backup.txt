@@ -1,0 +1,214 @@
+#include <Wire.h>
+#include <Arduino.h>
+#include <NewPing.h>
+#include <DynamixelShield.h>
+#include <Adafruit_BNO055.h>
+#include <Adafruit_Sensor.h>
+#include "DFRobot_I2CMultiplexer.h"
+#include "Adafruit_MLX90614.h"
+#include "Adafruit_I2CDevice.h"
+#include "Adafruit_SPIDevice.h"
+
+DFRobot_I2CMultiplexer I2CMulti(0x70);
+Adafruit_MLX90614 mlx = Adafruit_MLX90614();
+DynamixelShield dxl(Serial2, 2);
+Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x28);
+
+// Laser Pings
+#define Ping_C 25
+#define Ping_R 32
+#define Ping_L 33
+#define Dist_Max 200
+NewPing sonar[3] = {
+  NewPing(Ping_C, Ping_C, Dist_Max),
+  NewPing(Ping_R, Ping_R, Dist_Max),
+  NewPing(Ping_L, Ping_L, Dist_Max),
+};
+
+// Motors
+#define Base_L_Speed 300
+#define Base_R_Speed 300
+#define Turn_Speed_Multiplier 1.25
+#define MotorID_FL 4
+#define MotorID_FR 5
+#define MotorID_BL 8
+#define MotorID_BR 2
+#define Motor_Base_CCW_Value 0
+#define Motor_Base_CW_Value 1024
+int ccw(int speed) {return Motor_Base_CCW_Value + speed;}
+int cw(int speed) {return Motor_Base_CW_Value + speed;}
+int SPEED[2] = {
+  ccw(Base_L_Speed), 
+  cw(Base_R_Speed),
+};
+
+void prepareMotor(int id){
+  dxl.ping(id);
+  dxl.torqueOff(id);
+  dxl.setWheelMode(id);
+  dxl.torqueOn(id);
+  dxl.begin(1000000);
+  dxl.setPortProtocolVersion(1.0);
+}
+
+// Temp. Sensors
+void prepareMLX(int MLXport){
+  I2CMulti.selectPort(MLXport);
+  mlx.begin();
+}
+
+void setup() {
+  Wire.begin();
+  Serial.begin(9600); // USB Connection
+  Serial2.begin(115200); // Motors
+  prepareMLX(0); // Prep temp. sensors
+  prepareMLX(1);
+  prepareMotor(MotorID_FL); // Prep motors
+  prepareMotor(MotorID_FR);
+  prepareMotor(MotorID_BL);
+  prepareMotor(MotorID_BR);
+  bno.begin(); // Gyro
+  delay(2000);
+}
+
+float getTemperature(int MLXport){
+  I2CMulti.selectPort(MLXport);
+  float reading = mlx.readObjectTempC();
+  return reading;
+}
+
+void moveForward(){
+  SPEED[0] = cw(Base_L_Speed*0.5);
+  SPEED[1] = ccw(Base_R_Speed*0.5);
+}
+void moveRight(){
+  SPEED[0] = ccw((Base_L_Speed * Turn_Speed_Multiplier) * 0.5);
+  SPEED[1] = ccw((Base_R_Speed * Turn_Speed_Multiplier) * 1);
+}
+void moveLeft(){
+  SPEED[0] = cw((Base_L_Speed * Turn_Speed_Multiplier) * 1);
+  SPEED[1] = cw((Base_R_Speed * Turn_Speed_Multiplier) * 0.5);
+}
+void moveBack()
+{
+  SPEED[0] = ccw(Base_L_Speed*0.5);
+  SPEED[1] = cw(Base_R_Speed*0.5);
+}
+void moveHold(){
+  SPEED[0] = 0;
+  SPEED[1] = 0;
+}
+
+// Initial ping values
+int Ping_C_Data = 100;
+int Ping_R_Data = 100;
+int Ping_L_Data = 100;
+
+sensors_event_t bno_event;
+int rot = 0;
+
+
+
+float GetCurrentHeading()
+{
+  bno.getEvent(&bno_event);
+  return bno_event.orientation.x;
+}
+
+const float rotationTolerance = 0.5;
+void TurnRobot(char direction)
+{
+  float initialHeading = GetCurrentHeading();
+  if(initialHeading > 355 || initialHeading < 5) initialHeading = 0;
+  else if(initialHeading > 85 && initialHeading < 95) initialHeading = 90;
+  else if(initialHeading > 175 && initialHeading < 185) initialHeading = 180;
+  else if(initialHeading > 265 && initialHeading < 275) initialHeading = 270;
+  else
+  {
+    Serial.println("Fatal Error: gyro got fucked, lol");
+    exit(0);
+  }
+  float targetHeading;
+  switch(direction)
+  {
+    case 'L':
+      targetHeading = initialHeading - 90;
+      if(targetHeading == -90) targetHeading = 270;
+      SPEED[0] = cw((Base_L_Speed * Turn_Speed_Multiplier) * 0.5);
+      SPEED[1] = cw((Base_R_Speed * Turn_Speed_Multiplier) * 0.5);  
+      break;
+    case 'R':
+      targetHeading = initialHeading + 90;     
+      SPEED[0] = ccw((Base_L_Speed * Turn_Speed_Multiplier) * 0.5);
+      SPEED[1] = ccw((Base_R_Speed * Turn_Speed_Multiplier) * 0.5);
+      break;
+    default:
+      Serial.println("Error: wrong parameter passed to TurnRobot function!");
+      return;
+  }
+  float targetRange[2] = {targetHeading - rotationTolerance, targetHeading + rotationTolerance};
+  if(targetRange[0] < 0) targetRange[0] = 360 + targetRange[0];
+  dxl.setGoalVelocity(MotorID_FL, SPEED[1], UNIT_RAW);
+  dxl.setGoalVelocity(MotorID_FR, SPEED[0], UNIT_RAW);
+  dxl.setGoalVelocity(MotorID_BL, SPEED[1], UNIT_RAW);
+  dxl.setGoalVelocity(MotorID_BR, SPEED[0], UNIT_RAW);
+  delay(100);
+  while(true)
+  {
+    
+    if(GetCurrentHeading() > targetRange[0] && GetCurrentHeading() < targetRange[1])
+    {
+      SPEED[0] = 0;
+      SPEED[1] = 0;
+      dxl.setGoalVelocity(MotorID_FL, SPEED[1], UNIT_RAW);
+    	dxl.setGoalVelocity(MotorID_FR, SPEED[0], UNIT_RAW);
+      dxl.setGoalVelocity(MotorID_BL, SPEED[1], UNIT_RAW);
+      dxl.setGoalVelocity(MotorID_BR, SPEED[0], UNIT_RAW);
+      break;
+    }
+  }
+  Serial.print("Succesfully completeted turn - Target: ");
+  Serial.print(targetHeading);
+  Serial.print(", Actual: ");
+  Serial.println(GetCurrentHeading());
+}
+
+
+void loop() {
+  Ping_C_Data = sonar[0].ping_cm()+2;
+  Ping_R_Data = sonar[1].ping_cm()+4;
+  Ping_L_Data = sonar[2].ping_cm()+5;
+  dxl.setGoalVelocity(MotorID_FL, SPEED[1], UNIT_RAW);
+  dxl.setGoalVelocity(MotorID_FR, SPEED[0], UNIT_RAW);
+  dxl.setGoalVelocity(MotorID_BL, SPEED[1], UNIT_RAW);
+  dxl.setGoalVelocity(MotorID_BR, SPEED[0], UNIT_RAW);
+    
+  
+  if(Ping_C_Data<6)
+  {
+    moveBack();
+    dxl.setGoalVelocity(MotorID_FL, SPEED[1], UNIT_RAW);
+    dxl.setGoalVelocity(MotorID_FR, SPEED[0], UNIT_RAW);
+    dxl.setGoalVelocity(MotorID_BL, SPEED[1], UNIT_RAW);
+    dxl.setGoalVelocity(MotorID_BR, SPEED[0], UNIT_RAW);
+    delay(400);
+    moveHold();
+    dxl.setGoalVelocity(MotorID_FL, SPEED[1], UNIT_RAW);
+    dxl.setGoalVelocity(MotorID_FR, SPEED[0], UNIT_RAW);
+    dxl.setGoalVelocity(MotorID_BL, SPEED[1], UNIT_RAW);
+    dxl.setGoalVelocity(MotorID_BR, SPEED[0], UNIT_RAW);
+    TurnRobot('R');
+    delay(500);
+  }
+  else
+  {
+    moveForward();
+    dxl.setGoalVelocity(MotorID_FL, SPEED[1], UNIT_RAW);
+    dxl.setGoalVelocity(MotorID_FR, SPEED[0], UNIT_RAW);
+    dxl.setGoalVelocity(MotorID_BL, SPEED[1], UNIT_RAW);
+    dxl.setGoalVelocity(MotorID_BR, SPEED[0], UNIT_RAW);
+  }
+  
+  
+  
+}
